@@ -79,11 +79,13 @@ def train_with_early_stopping(
     model: torch.nn.Module,
     train_loader: torch.utils.data.DataLoader,
     valid_loader: torch.utils.data.DataLoader,
+    loss_fn: callable,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     patience: int = 5,
     max_epochs: int = 100,
     min_delta: float = 1e-4,
+    save_path: str = None,
 ) -> Tuple[int, float, List[float]]:
     """
     Train a model with early stopping to find optimal number of epochs.
@@ -97,6 +99,7 @@ def train_with_early_stopping(
         patience: Number of epochs to wait for improvement before stopping
         max_epochs: Maximum number of epochs to train
         min_delta: Minimum change in loss to qualify as an improvement
+        save_path: Path to save the best model state
 
     Returns:
         Tuple containing:
@@ -110,8 +113,6 @@ def train_with_early_stopping(
     losses = []
 
     for epoch in range(max_epochs):
-        print(f"=== EPOCH {epoch} ===")
-
         # Training phase
         model.train()
         train_repro_loss = 0.0
@@ -122,7 +123,7 @@ def train_with_early_stopping(
             optimizer.zero_grad()
 
             x_hat, mu, logvar = model.forward(x)
-            repro_loss, kld_loss = loss_function(x, x_hat, mu, logvar)
+            repro_loss, kld_loss = loss_fn(x, x_hat, mu, logvar)
 
             loss = repro_loss + kld_loss
 
@@ -141,7 +142,7 @@ def train_with_early_stopping(
             for batch_idx, x in enumerate(valid_loader):
                 x = torch.clamp(x, 0, 1).float().to(device)
                 x_hat, mu, logvar = model.forward(x)
-                repro_loss, kld_loss = loss_function(x, x_hat, mu, logvar)
+                repro_loss, kld_loss = loss_fn(x, x_hat, mu, logvar)
 
                 valid_repro_loss += repro_loss.item()
                 valid_kld_loss += kld_loss.item()
@@ -151,17 +152,21 @@ def train_with_early_stopping(
         losses.append(current_loss)
 
         print(
-            f"Training loss: {train_repro_loss/len(train_loader.dataset):.2e}, "
-            f"{train_kld_loss/len(train_loader.dataset):.2e}\n"
-            f"Validation loss: {valid_repro_loss/len(valid_loader.dataset):.2e}, "
+            f"Epoch {epoch} | "
+            f"Train: {train_repro_loss/len(train_loader.dataset):.2e}, "
+            f"{train_kld_loss/len(train_loader.dataset):.2e} | "
+            f"Val: {valid_repro_loss/len(valid_loader.dataset):.2e}, "
             f"{valid_kld_loss/len(valid_loader.dataset):.2e}"
         )
 
-        # Early stopping logic
+        # Early stopping logic and model checkpointing
         if current_loss < best_loss - min_delta:
             best_loss = current_loss
             best_epoch = epoch
             patience_counter = 0
+            # Save the best model
+            if save_path is not None:
+                torch.save(model.state_dict(), save_path)
         else:
             patience_counter += 1
 
@@ -205,6 +210,7 @@ def find_optimal_latent_dim(
     model_class: torch.nn.Module,
     train_loader: torch.utils.data.DataLoader,
     valid_loader: torch.utils.data.DataLoader,
+    loss_fn: callable,
     device: torch.device,
     max_latent_dim: int,
     **kwargs,
@@ -228,12 +234,13 @@ def find_optimal_latent_dim(
     for dim in range(1, max_latent_dim + 1):
         print(f"\nTesting latent dimension: {dim}")
         model = model_class(latent_dim=dim).to(device)
-        optimizer = torch.optim.Adam(model.parameters())
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-2)
 
         best_epoch, best_loss, losses = train_with_early_stopping(
             model=model,
             train_loader=train_loader,
             valid_loader=valid_loader,
+            loss_fn=loss_fn,
             optimizer=optimizer,
             device=device,
             **kwargs,
